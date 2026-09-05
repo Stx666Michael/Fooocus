@@ -212,6 +212,11 @@ with shared.gradio_root:
                             with gr.Column():
                                 uov_method = gr.Radio(label='Upscale or Variation:', choices=flags.uov_list, value=modules.config.default_uov_method)
                                 gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions/390" target="_blank">\U0001F4D4 Documentation</a>')
+                    with gr.Tab(label='Batch Upscale', id='batch_upscale_tab') as batch_upscale_tab:
+                        batch_upscale_input = gr.File(label='Images', file_count='multiple',
+                                                      file_types=['image'], type='file')
+                        gr.Markdown('Upload multiple images to process them with Fast 2x upscaling. '
+                                    'Prompts and diffusion settings are not used.')
                     with gr.Tab(label='Image Prompt', id='ip_tab') as ip_tab:
                         with gr.Row():
                             ip_images = []
@@ -547,6 +552,7 @@ with shared.gradio_root:
 
             current_tab = gr.Textbox(value='uov', visible=False)
             uov_tab.select(lambda: 'uov', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
+            batch_upscale_tab.select(lambda: 'batch_upscale', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             inpaint_tab.select(lambda: 'inpaint', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             ip_tab.select(lambda: 'ip', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             describe_tab.select(lambda: 'desc', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
@@ -983,7 +989,7 @@ with shared.gradio_root:
 
         ctrls += [base_model, refiner_model, refiner_switch] + lora_ctrls
         ctrls += [input_image_checkbox, current_tab]
-        ctrls += [uov_method, uov_input_image]
+        ctrls += [uov_method, uov_input_image, batch_upscale_input]
         ctrls += [outpaint_selections, inpaint_input_image, inpaint_additional_prompt, inpaint_mask_image]
         ctrls += [disable_preview, disable_intermediate_results, disable_seed_increment, black_out_nsfw]
         ctrls += [adm_scaler_positive, adm_scaler_negative, adm_scaler_end, adaptive_cfg, clip_skip]

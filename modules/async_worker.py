@@ -51,6 +51,7 @@ class AsyncTask:
         self.current_tab = args.pop()
         self.uov_method = args.pop()
         self.uov_input_image = args.pop()
+        self.batch_upscale_input = args.pop()
         self.outpaint_selections = args.pop()
         self.inpaint_input_image = args.pop()
         self.inpaint_additional_prompt = args.pop()
@@ -155,6 +156,8 @@ class AsyncTask:
                     enhance_mask_invert
                 ])
         self.should_enhance = self.enhance_checkbox and (self.enhance_uov_method != disabled.casefold() or len(self.enhance_ctrls) > 0)
+        if self.current_tab == 'batch_upscale':
+            self.should_enhance = False
         self.images_to_enhance_count = 0
         self.enhance_stats = {}
 
@@ -962,6 +965,69 @@ def worker():
         processing_time = time.perf_counter() - processing_start_time
         print(f'Processing time (total): {processing_time:.2f} seconds')
 
+    def get_batch_upscale_path(image_file):
+        if isinstance(image_file, str):
+            return image_file
+        if isinstance(image_file, os.PathLike):
+            return os.fspath(image_file)
+
+        image_path = getattr(image_file, 'name', None)
+        if isinstance(image_path, str):
+            return image_path
+
+        raise ValueError('Batch Upscale received an invalid image file.')
+
+    def load_batch_upscale_image(image_file):
+        image_path = get_batch_upscale_path(image_file)
+        if not os.path.isfile(image_path):
+            raise ValueError(f'Batch Upscale image does not exist: {image_path}')
+
+        from PIL import Image
+
+        with Image.open(image_path) as source:
+            image = np.array(source.convert('RGBA'), dtype=np.uint8)
+
+        return HWC3(image), image_path
+
+    def process_batch_upscale(async_task, processing_start_time):
+        image_files = async_task.batch_upscale_input
+        if image_files is None:
+            raise ValueError('Batch Upscale requires at least one image.')
+        if not isinstance(image_files, (list, tuple)):
+            image_files = [image_files]
+        if len(image_files) == 0:
+            raise ValueError('Batch Upscale requires at least one image.')
+
+        total_images = len(image_files)
+        fast_upscale_method = flags.upscale_fast.casefold()
+        metadata = [('Upscale (Fast)', 'upscale_fast', '2x')]
+
+        for index, image_file in enumerate(image_files):
+            image, image_path = load_batch_upscale_image(image_file)
+            progress = int(index * 100 / total_images)
+            direct_return, image, _, _, _, _, _, _ = apply_upscale(
+                async_task, image, fast_upscale_method, None, progress)
+            if not direct_return:
+                raise RuntimeError(f'Fast 2x upscaling did not return directly for {image_path}.')
+
+            if modules.config.default_black_out_nsfw or async_task.black_out_nsfw:
+                progressbar(async_task, progress, 'Checking for NSFW content ...')
+                image = default_censor(image)
+
+            output_path = log(image, metadata, output_format=async_task.output_format)
+            completed_progress = int((index + 1) * 100 / total_images)
+            progressbar(async_task, completed_progress, f'Finished image {index + 1}/{total_images}.')
+            yield_result(
+                async_task,
+                output_path,
+                completed_progress,
+                async_task.black_out_nsfw,
+                censor=False,
+                do_not_show_finished_images=async_task.disable_intermediate_results
+            )
+
+        stop_processing(async_task, processing_start_time)
+
     def process_enhance(all_steps, async_task, callback, controlnet_canny_path, controlnet_cpds_path,
                         current_progress, current_task_id, denoising_strength, inpaint_disable_initial_latent,
                         inpaint_engine, inpaint_respective_field, inpaint_strength,
@@ -1076,6 +1142,10 @@ def worker():
         base_model_additional_loras = []
         async_task.uov_method = async_task.uov_method.casefold()
         async_task.enhance_uov_method = async_task.enhance_uov_method.casefold()
+
+        if async_task.input_image_checkbox and async_task.current_tab == 'batch_upscale':
+            process_batch_upscale(async_task, preparation_start_time)
+            return
 
         if fooocus_expansion in async_task.style_selections:
             use_expansion = True
