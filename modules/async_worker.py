@@ -168,6 +168,32 @@ class EarlyReturnException(BaseException):
     pass
 
 
+def parse_aspect_ratio_selection(aspect_ratios_selection):
+    if isinstance(aspect_ratios_selection, str):
+        aspect_ratios_selection = [aspect_ratios_selection]
+    elif not isinstance(aspect_ratios_selection, (list, tuple)):
+        aspect_ratios_selection = []
+
+    dimensions = []
+    for selection in aspect_ratios_selection:
+        if not isinstance(selection, str):
+            continue
+        parts = selection.replace('×', ' ').replace('*', ' ').split()
+        if len(parts) < 2:
+            continue
+        try:
+            width, height = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if width > 0 and height > 0:
+            dimensions.append((width, height))
+
+    if len(dimensions) == 0:
+        raise ValueError('At least one valid aspect ratio must be selected.')
+
+    return dimensions
+
+
 def worker():
     global async_tasks
 
@@ -252,15 +278,9 @@ def worker():
                 return
             results.append(img)
 
-        H, W, C = results[0].shape
-
+        C = results[0].shape[2]
         for img in results:
-            Hn, Wn, Cn = img.shape
-            if H != Hn:
-                return
-            if W != Wn:
-                return
-            if C != Cn:
+            if img.shape[2] != C:
                 return
 
         cols = float(len(results)) ** 0.5
@@ -268,13 +288,17 @@ def worker():
         rows = float(len(results)) / float(cols)
         rows = int(math.ceil(rows))
 
-        wall = np.zeros(shape=(H * rows, W * cols, C), dtype=np.uint8)
+        cell_height = max(img.shape[0] for img in results)
+        cell_width = max(img.shape[1] for img in results)
+        wall = np.zeros(shape=(cell_height * rows, cell_width * cols, C), dtype=np.uint8)
 
         for y in range(rows):
             for x in range(cols):
                 if y * cols + x < len(results):
                     img = results[y * cols + x]
-                    wall[y * H:y * H + H, x * W:x * W + W, :] = img
+                    top = y * cell_height + (cell_height - img.shape[0]) // 2
+                    left = x * cell_width + (cell_width - img.shape[1]) // 2
+                    wall[top:top + img.shape[0], left:left + img.shape[1], :] = img
 
         # must use deep copy otherwise gradio is super laggy. Do not use list.append() .
         async_task.results = async_task.results + [wall]
@@ -1185,8 +1209,8 @@ def worker():
         denoising_strength = 1.0
         tiled = False
 
-        width, height = async_task.aspect_ratios_selection.replace('×', ' ').split(' ')[:2]
-        width, height = int(width), int(height)
+        selected_aspect_ratios = parse_aspect_ratio_selection(async_task.aspect_ratios_selection)
+        width, height = selected_aspect_ratios[0]
 
         skip_prompt_processing = False
 
@@ -1275,6 +1299,17 @@ def worker():
             except EarlyReturnException:
                 return
 
+        if any(goal in goals for goal in ('vary', 'upscale', 'inpaint')):
+            if len(selected_aspect_ratios) > 1:
+                print('[Aspect Ratios] Image-driven processing uses the first selected ratio.')
+            generation_aspect_ratios = [(width, height)]
+        else:
+            generation_aspect_ratios = []
+            for ratio_width, ratio_height in selected_aspect_ratios:
+                _, _, generation_width, generation_height = apply_overrides(
+                    async_task, async_task.steps, ratio_height, ratio_width)
+                generation_aspect_ratios.append((generation_width, generation_height))
+
         if 'cn' in goals:
             apply_control_nets(async_task, height, ip_adapter_face_path, ip_adapter_path, width, current_progress)
             if async_task.debugging_cn_preprocessor:
@@ -1296,7 +1331,14 @@ def worker():
             yield_result(async_task, async_task.enhance_input_image, current_progress, async_task.black_out_nsfw, False,
                          async_task.disable_intermediate_results)
 
-        all_steps = steps * async_task.image_number
+        tasks = [
+            dict(task, generation_width=ratio_width, generation_height=ratio_height)
+            for ratio_width, ratio_height in generation_aspect_ratios
+            for task in tasks
+        ]
+        generation_image_count = len(tasks)
+
+        all_steps = steps * generation_image_count
 
         if async_task.enhance_checkbox and async_task.enhance_uov_method != flags.disabled.casefold():
             enhance_upscale_steps = async_task.performance_selection.steps()
@@ -1306,12 +1348,12 @@ def worker():
                 else:
                     enhance_upscale_steps = async_task.performance_selection.steps_uov()
             enhance_upscale_steps, _, _, _ = apply_overrides(async_task, enhance_upscale_steps, height, width)
-            enhance_upscale_steps_total = async_task.image_number * enhance_upscale_steps
+            enhance_upscale_steps_total = len(images_to_enhance) * enhance_upscale_steps
             all_steps += enhance_upscale_steps_total
 
         if async_task.enhance_checkbox and len(async_task.enhance_ctrls) != 0:
             enhance_steps, _, _, _ = apply_overrides(async_task, async_task.original_steps, height, width)
-            all_steps += async_task.image_number * len(async_task.enhance_ctrls) * enhance_steps
+            all_steps += len(images_to_enhance) * len(async_task.enhance_ctrls) * enhance_steps
 
         all_steps = max(all_steps, 1)
 
@@ -1335,7 +1377,7 @@ def worker():
         processing_start_time = time.perf_counter()
 
         preparation_steps = current_progress
-        total_count = async_task.image_number
+        total_count = generation_image_count
 
         def callback(step, x0, x, total_steps, y):
             if step == 0:
@@ -1345,11 +1387,13 @@ def worker():
                 int(current_progress + async_task.callback_steps),
                 f'Sampling step {step + 1}/{total_steps}, image {current_task_id + 1}/{total_count} ...', y)])
 
-        show_intermediate_results = len(tasks) > 1 or async_task.should_enhance
+        show_intermediate_results = generation_image_count > 1 or async_task.should_enhance
         persist_image = not async_task.should_enhance or not async_task.save_final_enhanced_image_only
 
         for current_task_id, task in enumerate(tasks):
-            progressbar(async_task, current_progress, f'Preparing task {current_task_id + 1}/{async_task.image_number} ...')
+            task_width = task['generation_width']
+            task_height = task['generation_height']
+            progressbar(async_task, current_progress, f'Preparing task {current_task_id + 1}/{generation_image_count} ...')
             execution_start_time = time.perf_counter()
 
             try:
@@ -1357,9 +1401,9 @@ def worker():
                                                                  controlnet_cpds_path, current_task_id,
                                                                  denoising_strength, final_scheduler_name, goals,
                                                                  initial_latent, async_task.steps, switch, task['c'],
-                                                                 task['uc'], task, loras, tiled, use_expansion, width,
-                                                                 height, current_progress, preparation_steps,
-                                                                 async_task.image_number, show_intermediate_results,
+                                                                 task['uc'], task, loras, tiled, use_expansion,
+                                                                 task_width, task_height, current_progress, preparation_steps,
+                                                                 generation_image_count, show_intermediate_results,
                                                                  persist_image)
 
                 current_progress = int(preparation_steps + (100 - preparation_steps) / float(all_steps) * async_task.steps * (current_task_id + 1))
@@ -1405,6 +1449,7 @@ def worker():
         for index, img in enumerate(images_to_enhance):
             async_task.enhance_stats[index] = 0
             enhancement_image_start_time = time.perf_counter()
+            image_height, image_width = img.shape[:2]
 
             last_enhance_prompt = async_task.prompt
             last_enhance_negative_prompt = async_task.negative_prompt
@@ -1415,8 +1460,9 @@ def worker():
                 current_task_id, done_steps_inpainting, done_steps_upscaling, img, exception_result = enhance_upscale(
                     all_steps, async_task, base_progress, callback, controlnet_canny_path, controlnet_cpds_path,
                     current_task_id, denoising_strength, done_steps_inpainting, done_steps_upscaling, enhance_steps,
-                    async_task.prompt, async_task.negative_prompt, final_scheduler_name, height, img, preparation_steps,
-                    switch, tiled, total_count, use_expansion, use_style, use_synthetic_refiner, width, persist_image)
+                    async_task.prompt, async_task.negative_prompt, final_scheduler_name, image_height, img,
+                    preparation_steps, switch, tiled, total_count, use_expansion, use_style, use_synthetic_refiner,
+                    image_width, persist_image)
                 async_task.enhance_stats[index] += 1
 
                 if exception_result == 'continue':
@@ -1475,13 +1521,14 @@ def worker():
                 goals_enhance = ['inpaint']
 
                 try:
+                    image_height, image_width = img.shape[:2]
                     current_progress, img, enhance_prompt_processed, enhance_negative_prompt_processed = process_enhance(
                         all_steps, async_task, callback, controlnet_canny_path, controlnet_cpds_path,
                         current_progress, current_task_id, denoising_strength, enhance_inpaint_disable_initial_latent,
                         enhance_inpaint_engine, enhance_inpaint_respective_field, enhance_inpaint_strength,
-                        enhance_prompt, enhance_negative_prompt, final_scheduler_name, goals_enhance, height, img, mask,
+                        enhance_prompt, enhance_negative_prompt, final_scheduler_name, goals_enhance, image_height, img, mask,
                         preparation_steps, enhance_steps, switch, tiled, total_count, use_expansion, use_style,
-                        use_synthetic_refiner, width, persist_image=persist_image)
+                        use_synthetic_refiner, image_width, persist_image=persist_image)
                     async_task.enhance_stats[index] += 1
 
                     if (should_process_enhance_uov and async_task.enhance_uov_processing_order == flags.enhancement_uov_after
@@ -1513,12 +1560,13 @@ def worker():
                 current_task_id += 1
                 # last step in enhance, always save
                 persist_image = True
+                image_height, image_width = img.shape[:2]
                 current_task_id, done_steps_inpainting, done_steps_upscaling, img, exception_result = enhance_upscale(
                     all_steps, async_task, base_progress, callback, controlnet_canny_path, controlnet_cpds_path,
                     current_task_id, denoising_strength, done_steps_inpainting, done_steps_upscaling, enhance_steps,
-                    last_enhance_prompt, last_enhance_negative_prompt, final_scheduler_name, height, img,
+                    last_enhance_prompt, last_enhance_negative_prompt, final_scheduler_name, image_height, img,
                     preparation_steps, switch, tiled, total_count, use_expansion, use_style, use_synthetic_refiner,
-                    width, persist_image)
+                    image_width, persist_image)
                 async_task.enhance_stats[index] += 1
                 
                 if exception_result == 'continue':
