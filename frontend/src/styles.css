@@ -1501,6 +1501,18 @@ kbd {
   appearance: none;
 }
 
+.field > input {
+  width: 100%;
+  min-height: 35px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  outline: 0;
+  background: var(--panel-soft);
+  color: var(--muted-strong);
+  font-size: 10px;
+}
+
 .select-wrap > .icon {
   position: absolute;
   top: 10px;
@@ -1510,6 +1522,7 @@ kbd {
 }
 
 .select-wrap select:focus,
+.field > input:focus,
 .seed-input input:focus {
   border-color: rgba(216, 247, 91, .55);
 }

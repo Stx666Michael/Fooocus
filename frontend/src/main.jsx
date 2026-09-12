@@ -107,7 +107,13 @@ function apiError(response, fallback) {
 
 function readableRatio(value) {
   const [width, height] = String(value).split('*');
-  return width && height ? `${width} × ${height}` : value;
+  const numericWidth = Number(width);
+  const numericHeight = Number(height);
+  if (!width || !height || !Number.isFinite(numericWidth) || !Number.isFinite(numericHeight)) {
+    return value;
+  }
+  const divisor = greatestCommonDivisor(numericWidth, numericHeight);
+  return `${numericWidth / divisor}:${numericHeight / divisor} (${numericWidth}×${numericHeight})`;
 }
 
 function itemTimestamp(item) {
