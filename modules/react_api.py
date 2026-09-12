@@ -600,11 +600,16 @@ def _build_task(payload: dict[str, Any]) -> worker.AsyncTask:
     task.refiner_switch = _safe_float(payload.get('refinerSwitch'), float(config.default_refiner_switch), 0.1, 1)
     task.loras = [(name, weight) for enabled, name, weight in loras if enabled and name != 'None']
 
-    input_enabled = bool(payload.get('inputImageEnabled', False))
     mode = payload.get('currentTab', 'uov')
+    input_enabled = bool(payload.get('inputImageEnabled', False))
     task.input_image_checkbox = input_enabled
     task.current_tab = mode if mode in ('uov', 'batch_upscale', 'inpaint', 'ip', 'desc', 'enhance', 'metadata') else 'uov'
-    task.uov_method = payload.get('uovMethod') if payload.get('uovMethod') in flags.uov_list else config.default_uov_method
+    uov_method = payload.get('uovMethod')
+    if uov_method not in flags.uov_list:
+        uov_method = config.default_uov_method
+    if mode == 'batch_upscale' and uov_method not in (flags.upscale_15, flags.upscale_2, flags.upscale_fast):
+        uov_method = flags.upscale_fast
+    task.uov_method = uov_method
     task.uov_input_image = _decode_image(payload.get('inputImage'))
     task.batch_upscale_input = _decode_batch_images(payload.get('batchImages'))
     task.outpaint_selections = payload.get('outpaintSelections', []) if isinstance(payload.get('outpaintSelections', []), list) else []

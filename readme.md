@@ -31,7 +31,7 @@ Below is a quick list using Midjourney's examples:
 | High-quality text-to-image without needing much prompt engineering or parameter tuning. <br> (Unknown method) | High-quality text-to-image without needing much prompt engineering or parameter tuning. <br> (Fooocus has an offline GPT-2 based prompt processing engine and lots of sampling improvements so that results are always beautiful, no matter if your prompt is as short as “house in garden” or as long as 1000 words) |
 | V1 V2 V3 V4 | Input Image -> Upscale or Variation -> Vary (Subtle) / Vary (Strong)|
 | U1 U2 U3 U4 | Input Image -> Upscale or Variation -> Upscale (1.5x) / Upscale (2x) |
-| Batch upscale | Input Image -> Batch Upscale -> Fast 2x |
+| Batch upscale | Input Image -> Batch Upscale -> Fast 2x / 1.5x / 2x |
 | Inpaint / Up / Down / Left / Right (Pan) | Input Image -> Inpaint or Outpaint -> Inpaint / Up / Down / Left / Right <br> (Fooocus uses its own inpaint algorithm and inpaint models so that results are more satisfying than all other software that uses standard SDXL inpaint method/model) |
 | Image Prompt | Input Image -> Image Prompt <br> (Fooocus uses its own image prompt algorithm so that result quality and prompt understanding are more satisfying than all other software that uses standard SDXL methods like standard IP-Adapters or Revisions) |
 | --style | Advanced -> Style |
@@ -45,6 +45,8 @@ Below is a quick list using Midjourney's examples:
 | --ar | Advanced -> Aspect Ratios |
 | InsightFace | Input Image -> Image Prompt -> Advanced -> FaceSwap |
 | Describe | Input Image -> Describe |
+
+Batch upscale supports Fast 2x, regular 1.5x, and regular 2x. The regular modes run diffusion for each input image and use the selected generation settings; Fast 2x uses direct upscaling.
 
 Below is a quick list using LeonardoAI's examples:
 

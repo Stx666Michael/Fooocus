@@ -320,12 +320,26 @@ function ImageDropzone({ image, onChange, onClear, label, hint }) {
       onDragOver={(event) => event.preventDefault()}
       onDragLeave={() => setDragging(false)}
       onDrop={(event) => { event.preventDefault(); setDragging(false); readFile(event.dataTransfer.files[0]); }}
-      onClick={() => !image && inputRef.current?.click()}
+      onClick={() => inputRef.current?.click()}
       role="button"
       tabIndex={0}
-      onKeyDown={(event) => { if (event.key === 'Enter' && !image) inputRef.current?.click(); }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          inputRef.current?.click();
+        }
+      }}
     >
-      <input ref={inputRef} type="file" accept="image/*" hidden onChange={(event) => readFile(event.target.files[0])} />
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(event) => {
+          readFile(event.target.files[0]);
+          event.target.value = '';
+        }}
+      />
       {image ? (
         <>
           <img src={image} alt="Input reference" />
@@ -467,7 +481,13 @@ function PromptCard({
     setValue('inputImageEnabled', !['text', 'describe', 'metadata'].includes(mode));
     setValue('enhance', mode === 'enhance');
     setValue('uovMethod', mode === 'enhance' ? 'Upscale (2x)' : form.uovMethod);
-  }, [mode]);
+    if (mode === 'batch') {
+      const batchMethods = (config?.uovMethods || []).filter((method) => method.toLowerCase().includes('upscale'));
+      if (batchMethods.length && !batchMethods.includes(form.uovMethod)) {
+        setValue('uovMethod', batchMethods.find((method) => method.toLowerCase().includes('fast')) || batchMethods[0]);
+      }
+    }
+  }, [config, mode]);
 
   return (
     <section className="panel prompt-card">
@@ -517,7 +537,14 @@ function PromptCard({
                 images={form.batchImages}
                 onChange={(value) => setValue('batchImages', value)}
                 label="Drop multiple images"
-                hint="PNG, JPG or WEBP · fast 2x upscale"
+                hint="PNG, JPG or WEBP · one selected mode per batch"
+              />
+              <SelectField
+                label="Upscale mode"
+                value={form.uovMethod}
+                options={(config?.uovMethods || []).filter((method) => method.toLowerCase().includes('upscale'))}
+                onChange={(value) => setValue('uovMethod', value)}
+                hint="Regular modes apply diffusion settings; Fast 2x skips diffusion."
               />
             </>
           ) : (

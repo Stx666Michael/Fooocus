@@ -1148,7 +1148,219 @@ def worker():
             raise ValueError('Batch Upscale requires at least one image.')
 
         total_images = len(image_files)
-        fast_upscale_method = flags.upscale_fast.casefold()
+        upscale_method = async_task.uov_method
+        supported_methods = {
+            flags.upscale_15.casefold(),
+            flags.upscale_2.casefold(),
+            flags.upscale_fast.casefold(),
+        }
+        if upscale_method not in supported_methods:
+            raise ValueError('Batch Upscale requires an upscale mode.')
+
+        if upscale_method != flags.upscale_fast.casefold():
+            original_input_image = async_task.uov_input_image
+            original_image_number = async_task.image_number
+            original_steps = async_task.steps
+            current_progress = 0
+            current_task_id = 0
+            image_progress_base = 0
+            first_image = None
+            try:
+                if fooocus_expansion in async_task.style_selections:
+                    use_expansion = True
+                    async_task.style_selections.remove(fooocus_expansion)
+                else:
+                    use_expansion = False
+
+                use_style = len(async_task.style_selections) > 0
+
+                if async_task.base_model_name == async_task.refiner_model_name:
+                    print(f'Refiner disabled because base model and refiner are same.')
+                    async_task.refiner_model_name = 'None'
+
+                if async_task.performance_selection == Performance.EXTREME_SPEED:
+                    current_progress = set_lcm_defaults(async_task, current_progress, advance_progress=True)
+                elif async_task.performance_selection == Performance.LIGHTNING:
+                    current_progress = set_lightning_defaults(async_task, current_progress, advance_progress=True)
+                elif async_task.performance_selection == Performance.HYPER_SD:
+                    current_progress = set_hyper_sd_defaults(async_task, current_progress, advance_progress=True)
+
+                apply_patch_settings(async_task)
+                selected_aspect_ratios = parse_aspect_ratio_selection(async_task.aspect_ratios_selection)
+                width, height = selected_aspect_ratios[0]
+                goals = []
+                inpaint_worker.current_task = None
+
+                first_image, _ = load_batch_upscale_image(image_files[0])
+                first_image, skip_prompt_processing, async_task.steps = prepare_upscale(
+                    async_task,
+                    goals,
+                    first_image,
+                    upscale_method,
+                    async_task.performance_selection,
+                    async_task.steps,
+                    current_progress,
+                    advance_progress=True,
+                )
+
+                pipeline.refresh_controlnets([])
+                ip_adapter.load_ip_adapter(None, None, None)
+                ip_adapter.load_ip_adapter(None, None, None)
+
+                async_task.steps, switch, width, height = apply_overrides(
+                    async_task, async_task.steps, height, width)
+                if skip_prompt_processing:
+                    raise RuntimeError('Regular batch upscaling cannot skip prompt processing.')
+
+                tasks, use_expansion, loras, current_progress = process_prompt(
+                    async_task,
+                    async_task.prompt,
+                    async_task.negative_prompt,
+                    [],
+                    1,
+                    async_task.disable_seed_increment,
+                    use_expansion,
+                    use_style,
+                    False,
+                    current_progress,
+                    advance_progress=True,
+                )
+                if len(tasks) != 1:
+                    raise RuntimeError('Regular batch upscaling requires exactly one prompt task.')
+
+                if async_task.freeu_enabled:
+                    apply_freeu(async_task)
+
+                final_scheduler_name = patch_samplers(async_task)
+                task = tasks[0]
+                steps, _, _, _ = apply_overrides(async_task, async_task.steps, height, width)
+                all_steps = max(steps * total_images, 1)
+                preparation_steps = current_progress
+                progress_span = max(100 - preparation_steps, 0)
+                show_intermediate_results = False
+
+                def callback(step, x0, x, total_steps, y):
+                    if step == 0:
+                        async_task.callback_steps = 0
+                    async_task.callback_steps += progress_span / float(all_steps)
+                    progress = int(image_progress_base + async_task.callback_steps)
+                    set_queue_progress(
+                        async_task,
+                        progress,
+                        f'Sampling step {step + 1}/{total_steps}, image {current_task_id + 1}/{total_images} ...',
+                        y,
+                    )
+                    if async_task.stream_to_ui:
+                        async_task.yields.append(['preview', (
+                            progress,
+                            f'Sampling step {step + 1}/{total_steps}, image {current_task_id + 1}/{total_images} ...',
+                            y,
+                        )])
+
+                for index, image_file in enumerate(image_files):
+                    if async_task.last_stop is not False:
+                        break
+
+                    current_task_id = index
+                    image_progress_base = int(
+                        preparation_steps + progress_span * index / total_images)
+                    progressbar(
+                        async_task,
+                        image_progress_base,
+                        f'Preparing image {index + 1}/{total_images} ...',
+                    )
+                    if index == 0:
+                        image = first_image
+                    else:
+                        image, _ = load_batch_upscale_image(image_file)
+
+                    execution_start_time = time.perf_counter()
+                    direct_return, image, denoising_strength, initial_latent, tiled, width, height, image_progress = apply_upscale(
+                        async_task,
+                        image,
+                        upscale_method,
+                        switch,
+                        image_progress_base,
+                    )
+
+                    if direct_return:
+                        metadata = [('Upscale (Fast)', 'upscale_fast', '2x')]
+                        if modules.config.default_black_out_nsfw or async_task.black_out_nsfw:
+                            progressbar(async_task, image_progress_base, 'Checking for NSFW content ...')
+                            image = default_censor(image)
+                        output_path = log(
+                            image,
+                            metadata,
+                            output_format=async_task.output_format,
+                        )
+                        completed_progress = int(
+                            preparation_steps + progress_span * (index + 1) / total_images)
+                        yield_result(
+                            async_task,
+                            output_path,
+                            completed_progress,
+                            async_task.black_out_nsfw,
+                            censor=False,
+                            do_not_show_finished_images=True,
+                        )
+                        current_progress = completed_progress
+                        continue
+
+                    steps, _, _, _ = apply_overrides(async_task, async_task.steps, height, width)
+                    base_progress = image_progress_base
+                    try:
+                        _, _, current_progress = process_task(
+                            all_steps,
+                            async_task,
+                            callback,
+                            None,
+                            None,
+                            current_task_id,
+                            denoising_strength,
+                            final_scheduler_name,
+                            goals,
+                            initial_latent,
+                            steps,
+                            switch,
+                            task['c'],
+                            task['uc'],
+                            task,
+                            loras,
+                            tiled,
+                            use_expansion,
+                            width,
+                            height,
+                            base_progress,
+                            preparation_steps,
+                            total_images,
+                            show_intermediate_results,
+                            persist_image=True,
+                        )
+                    except ldm_patched.modules.model_management.InterruptProcessingException:
+                        if async_task.last_stop == 'skip':
+                            print('User skipped')
+                            async_task.last_stop = False
+                            current_progress = int(
+                                preparation_steps + progress_span * (index + 1) / total_images)
+                            continue
+                        print('User stopped')
+                        break
+
+                    current_progress = int(
+                        preparation_steps + progress_span * (index + 1) / total_images)
+                    print(
+                        f'Batch image {index + 1}/{total_images} time: '
+                        f'{time.perf_counter() - execution_start_time:.2f} seconds')
+
+                del task['c'], task['uc']
+            finally:
+                async_task.uov_input_image = original_input_image
+                async_task.image_number = original_image_number
+                async_task.steps = original_steps
+                if async_task.processing:
+                    stop_processing(async_task, processing_start_time)
+            return
+
         metadata = [
             ('Operation', 'operation', 'Upscale'),
             ('Upscale (Fast)', 'upscale_fast', '2x'),
@@ -1158,7 +1370,7 @@ def worker():
             image, image_path = load_batch_upscale_image(image_file)
             progress = int(index * 100 / total_images)
             direct_return, image, _, _, _, _, _, _ = apply_upscale(
-                async_task, image, fast_upscale_method, None, progress)
+                async_task, image, upscale_method, None, progress)
             if not direct_return:
                 raise RuntimeError(f'Fast 2x upscaling did not return directly for {image_path}.')
 
