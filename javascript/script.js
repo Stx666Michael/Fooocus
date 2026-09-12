@@ -238,6 +238,21 @@ function uiElementIsVisible(el) {
     return uiElementIsVisible(el.parentNode);
 }
 
+function startQueueStatusPolling() {
+    if (window.queueStatusInterval) {
+        return;
+    }
+
+    window.queueStatusInterval = window.setInterval(function() {
+        const refreshButton = gradioApp().querySelector('#queue_refresh_button');
+        if (refreshButton && !refreshButton.disabled) {
+            refreshButton.click();
+        }
+    }, 500);
+}
+
+onUiLoaded(startQueueStatusPolling);
+
 function uiElementInSight(el) {
     const clRect = el.getBoundingClientRect();
     const windowHeight = window.innerHeight;

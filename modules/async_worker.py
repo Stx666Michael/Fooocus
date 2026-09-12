@@ -1,3 +1,4 @@
+import os
 import threading
 
 from extras.inpaint_mask import generate_mask_from_image, SAMOptions
@@ -19,6 +20,10 @@ class AsyncTask:
         self.results = []
         self.last_stop = False
         self.processing = False
+        self.queue_id = None
+        self.queue_status = 'pending'
+        self.stream_to_ui = True
+        self.queue_progress = (0, 'Waiting for task to start ...', None)
 
         self.performance_loras = []
 
@@ -162,6 +167,120 @@ class AsyncTask:
         self.enhance_stats = {}
 
 async_tasks = []
+_queue_items = []
+_queue_lock = threading.RLock()
+_next_queue_id = 1
+
+
+def enqueue_task(task: AsyncTask, stream_to_ui=True):
+    global _next_queue_id
+
+    with _queue_lock:
+        task.queue_id = _next_queue_id
+        task.queue_status = 'pending'
+        task.stream_to_ui = stream_to_ui
+        _next_queue_id += 1
+        _queue_items.append(task)
+        async_tasks.append(task)
+
+    return task
+
+
+def dequeue_task():
+    with _queue_lock:
+        if len(async_tasks) == 0:
+            return None
+        return async_tasks.pop(0)
+
+
+def is_busy():
+    with _queue_lock:
+        return any(task.queue_status in ('pending', 'generating') for task in _queue_items)
+
+
+def set_queue_status(task: AsyncTask, status):
+    with _queue_lock:
+        task.queue_status = status
+
+
+def set_queue_progress(task: AsyncTask, number, text, image=None):
+    with _queue_lock:
+        previous_progress = getattr(task, 'queue_progress', (0, '', None))
+        if image is None and previous_progress[2] is not None:
+            image = previous_progress[2]
+        task.queue_progress = (number, text, image)
+
+
+def get_queue_items():
+    with _queue_lock:
+        items = list(_queue_items)
+
+    result = []
+    for task in items:
+        aspect_ratios = task.aspect_ratios_selection
+        if isinstance(aspect_ratios, str):
+            aspect_ratios = [aspect_ratios]
+        elif not isinstance(aspect_ratios, (list, tuple)):
+            aspect_ratios = []
+
+        result.append({
+            'id': task.queue_id,
+            'status': task.queue_status,
+            'prompt': task.prompt,
+            'negative_prompt': task.negative_prompt,
+            'styles': task.style_selections,
+            'performance': task.performance_selection.value,
+            'aspect_ratios': list(aspect_ratios),
+            'image_number': task.image_number,
+            'seed': task.seed,
+            'result_count': len(task.results),
+        })
+
+    return result
+
+
+def get_queue_progress():
+    with _queue_lock:
+        for task in _queue_items:
+            if task.queue_status == 'generating' and not task.stream_to_ui:
+                number, text, image = task.queue_progress
+                return {
+                    'active': True,
+                    'preserve': True,
+                    'progress': (number, text, image),
+                    'results': list(task.results),
+                }
+
+        preserve = any(
+            task.queue_status in ('pending', 'generating')
+            for task in _queue_items
+            if task.stream_to_ui
+        )
+        preserve = preserve or any(
+            task.queue_status == 'pending'
+            for task in _queue_items
+            if not task.stream_to_ui
+        )
+
+    return {
+        'active': False,
+        'preserve': preserve,
+        'progress': None,
+        'results': [],
+    }
+
+
+def get_queue_results():
+    with _queue_lock:
+        finished_tasks = [task for task in _queue_items if task.queue_status == 'finished']
+
+    results = []
+    for task in finished_tasks:
+        for result in task.results:
+            if isinstance(result, str) and not os.path.exists(result):
+                continue
+            results.append(result)
+    return results
 
 
 class EarlyReturnException(BaseException):
@@ -244,7 +363,9 @@ def worker():
 
     def progressbar(async_task, number, text):
         print(f'[Fooocus] {text}')
-        async_task.yields.append(['preview', (number, text, None)])
+        set_queue_progress(async_task, number, text)
+        if async_task.stream_to_ui:
+            async_task.yields.append(['preview', (number, text, None)])
 
     def yield_result(async_task, imgs, progressbar_index, black_out_nsfw, censor=True, do_not_show_finished_images=False):
         if not isinstance(imgs, list):
@@ -256,10 +377,12 @@ def worker():
 
         async_task.results = async_task.results + imgs
 
+        set_queue_progress(async_task, progressbar_index, 'Image finished')
         if do_not_show_finished_images:
             return
 
-        async_task.yields.append(['results', async_task.results])
+        if async_task.stream_to_ui:
+            async_task.yields.append(['results', async_task.results])
         return
 
     def build_image_wall(async_task):
@@ -1372,7 +1495,9 @@ def worker():
         final_scheduler_name = patch_samplers(async_task)
         print(f'Using {final_scheduler_name} scheduler.')
 
-        async_task.yields.append(['preview', (current_progress, 'Moving model to GPU ...', None)])
+        if async_task.stream_to_ui:
+            async_task.yields.append(['preview', (current_progress, 'Moving model to GPU ...', None)])
+        set_queue_progress(async_task, current_progress, 'Moving model to GPU ...')
 
         processing_start_time = time.perf_counter()
 
@@ -1383,9 +1508,16 @@ def worker():
             if step == 0:
                 async_task.callback_steps = 0
             async_task.callback_steps += (100 - preparation_steps) / float(all_steps)
-            async_task.yields.append(['preview', (
+            set_queue_progress(
+                async_task,
                 int(current_progress + async_task.callback_steps),
-                f'Sampling step {step + 1}/{total_steps}, image {current_task_id + 1}/{total_count} ...', y)])
+                f'Sampling step {step + 1}/{total_steps}, image {current_task_id + 1}/{total_count} ...',
+                y
+            )
+            if async_task.stream_to_ui:
+                async_task.yields.append(['preview', (
+                    int(current_progress + async_task.callback_steps),
+                    f'Sampling step {step + 1}/{total_steps}, image {current_task_id + 1}/{total_count} ...', y)])
 
         show_intermediate_results = generation_image_count > 1 or async_task.should_enhance
         persist_image = not async_task.should_enhance or not async_task.save_final_enhanced_image_only
@@ -1505,7 +1637,9 @@ def worker():
                     mask = 255 - mask
 
                 if async_task.debugging_enhance_masks_checkbox:
-                    async_task.yields.append(['preview', (current_progress, 'Loading ...', mask)])
+                    set_queue_progress(async_task, current_progress, 'Loading ...', mask)
+                    if async_task.stream_to_ui:
+                        async_task.yields.append(['preview', (current_progress, 'Loading ...', mask)])
                     yield_result(async_task, mask, current_progress, async_task.black_out_nsfw, False,
                                  async_task.disable_intermediate_results)
                     async_task.enhance_stats[index] += 1
@@ -1582,19 +1716,26 @@ def worker():
 
     while True:
         time.sleep(0.01)
-        if len(async_tasks) > 0:
-            task = async_tasks.pop(0)
+        task = dequeue_task()
+        if task is not None:
+            set_queue_status(task, 'generating')
+            set_queue_progress(task, 1, 'Waiting for task to start ...')
+            with ldm_patched.modules.model_management.interrupt_processing_mutex:
+                ldm_patched.modules.model_management.interrupt_processing = False
 
             try:
                 handler(task)
                 if task.generate_image_grid:
                     build_image_wall(task)
-                task.yields.append(['finish', task.results])
+                if task.stream_to_ui:
+                    task.yields.append(['finish', task.results])
                 pipeline.prepare_text_encoder(async_call=True)
             except:
                 traceback.print_exc()
-                task.yields.append(['finish', task.results])
+                if task.stream_to_ui:
+                    task.yields.append(['finish', task.results])
             finally:
+                set_queue_status(task, 'finished')
                 if pid in modules.patch.patch_settings:
                     del modules.patch.patch_settings[pid]
     pass

@@ -26,29 +26,133 @@ from modules.util import is_json
 
 def get_task(*args):
     args = list(args)
-    args.pop(0)
+    queue_mode = bool(args.pop(0))
+    current_task = args.pop(0)
+    task = worker.AsyncTask(args=args)
 
-    return worker.AsyncTask(args=args)
+    if queue_mode:
+        worker.enqueue_task(task, stream_to_ui=False)
+        return current_task
 
-def generate_clicked(task: worker.AsyncTask):
+    return task
+
+
+def generate_ui_state_change():
+    queue_mode = worker.is_busy()
+    if queue_mode:
+        return (
+            gr.update(),
+            gr.update(),
+            gr.update(visible=True, interactive=True),
+            gr.update(),
+            True,
+            True,
+        )
+
+    return (
+        gr.update(visible=True, interactive=True),
+        gr.update(visible=True, interactive=True),
+        gr.update(visible=True, interactive=True),
+        [],
+        True,
+        False,
+    )
+
+
+def clear_prompt_if_queued(queue_mode):
+    return gr.update(value='') if queue_mode else gr.update()
+
+
+def generation_finished(queue_mode):
+    if queue_mode:
+        return gr.update(visible=True, interactive=True), gr.update(), gr.update(), True
+
+    return (
+        gr.update(visible=True, interactive=True),
+        gr.update(visible=False, interactive=False),
+        gr.update(visible=False, interactive=False),
+        False,
+    )
+
+
+def queue_status_update(previous_state=None):
+    if not isinstance(previous_state, dict):
+        previous_state = {}
+
+    previous_result_signature = previous_state.get('result_signature', '')
+    previous_progress_active = previous_state.get('progress_active', False)
+    items = worker.get_queue_items()
+    result_signature = tuple(
+        (item['id'], item['status'], item['result_count'])
+        for item in items
+        if item['status'] == 'finished'
+    )
+    result_signature = repr(result_signature)
+    gallery_update = gr.update()
+    progress_html_update = gr.update()
+    progress_window_update = gr.update()
+    progress_gallery_update = gr.update()
+    progress_active = previous_progress_active
+    if result_signature != previous_result_signature:
+        results = worker.get_queue_results()
+        if len(results) > 0:
+            gallery_update = gr.update(visible=True, value=results)
+
+    queue_progress = worker.get_queue_progress()
+    if queue_progress['active']:
+        progress_active = True
+        number, title, image = queue_progress['progress']
+        progress_html_update = gr.update(
+            visible=True,
+            value=modules.html.make_progress_html(number, title)
+        )
+        progress_window_update = gr.update(visible=True)
+        if image is not None:
+            progress_window_update = gr.update(visible=True, value=image)
+        if len(queue_progress['results']) > 0:
+            progress_gallery_update = gr.update(visible=True, value=queue_progress['results'])
+        else:
+            progress_gallery_update = gr.update(visible=False, value=[])
+    elif previous_progress_active and not queue_progress['preserve']:
+        progress_active = False
+        progress_html_update = gr.update(visible=False)
+        progress_window_update = gr.update(visible=False)
+        progress_gallery_update = gr.update(visible=False)
+    elif not queue_progress['preserve']:
+        progress_active = False
+
+    return (
+        modules.html.make_queue_html(items),
+        gallery_update,
+        progress_html_update,
+        progress_window_update,
+        progress_gallery_update,
+        {
+            'result_signature': result_signature,
+            'progress_active': progress_active,
+        },
+    )
+
+
+def generate_clicked(task: worker.AsyncTask, queue_mode=False):
+    if queue_mode:
+        return
+
     import ldm_patched.modules.model_management as model_management
 
     with model_management.interrupt_processing_mutex:
         model_management.interrupt_processing = False
     # outputs=[progress_html, progress_window, progress_gallery, gallery]
 
-    if len(task.args) == 0:
-        return
-
     execution_start_time = time.perf_counter()
     finished = False
+
+    worker.enqueue_task(task)
 
     yield gr.update(visible=True, value=modules.html.make_progress_html(1, 'Waiting for task to start ...')), \
         gr.update(visible=True, value=None), \
         gr.update(visible=False, value=None), \
         gr.update(visible=False)
-
-    worker.async_tasks.append(task)
 
     while not finished:
         time.sleep(0.01)
@@ -155,6 +259,7 @@ shared.gradio_root = gr.Blocks(title=title).queue()
 with shared.gradio_root:
     currentTask = gr.State(worker.AsyncTask(args=[]))
     inpaint_engine_state = gr.State('empty')
+    queue_poll_state = gr.State({'result_signature': '', 'progress_active': False})
     with gr.Row():
         with gr.Column(scale=2):
             with gr.Row():
@@ -171,6 +276,8 @@ with shared.gradio_root:
                 with gr.Column(scale=17):
                     prompt = gr.Textbox(show_label=False, placeholder="Type prompt here or paste parameters.", elem_id='positive_prompt',
                                         autofocus=True, lines=3)
+                    queue_display = gr.HTML(value=modules.html.make_queue_html([]), elem_id='prompt_queue')
+                    queue_refresh_button = gr.Button(visible=False, elem_id='queue_refresh_button')
 
                     default_prompt = modules.config.default_prompt
                     if isinstance(default_prompt, str) and default_prompt != '':
@@ -907,6 +1014,7 @@ with shared.gradio_root:
                                     queue=False, show_progress=False)
 
         state_is_generating = gr.State(False)
+        queue_mode_state = gr.State(False)
 
         load_data_outputs = [advanced_checkbox, image_number, prompt, negative_prompt, style_selections,
                              performance_selection, overwrite_step, overwrite_switch, aspect_ratios_selection,
@@ -994,7 +1102,7 @@ with shared.gradio_root:
                                            inpaint_mask_sam_max_detections, dino_erode_or_dilate, debugging_dino],
                                    outputs=inpaint_mask_image, show_progress=True, queue=True)
 
-        ctrls = [currentTask, generate_image_grid]
+        ctrls = [queue_mode_state, currentTask, generate_image_grid]
         ctrls += [
             prompt, negative_prompt, style_selections,
             performance_selection, aspect_ratios_selection, image_number, output_format, image_seed,
@@ -1027,6 +1135,15 @@ with shared.gradio_root:
                   enhance_uov_prompt_type]
         ctrls += enhance_ctrls
 
+        queue_refresh_button.click(queue_status_update, inputs=queue_poll_state,
+                                   outputs=[queue_display, gallery, progress_html,
+                                            progress_window, progress_gallery, queue_poll_state],
+                                   queue=False, show_progress=False)
+        shared.gradio_root.load(queue_status_update, inputs=queue_poll_state,
+                                outputs=[queue_display, gallery, progress_html,
+                                         progress_window, progress_gallery, queue_poll_state],
+                                queue=False, show_progress=False)
+
         def parse_meta(raw_prompt_txt, is_generating):
             loaded_json = None
             if is_json(raw_prompt_txt):
@@ -1040,9 +1157,13 @@ with shared.gradio_root:
 
             return json.dumps(loaded_json), gr.update(visible=False), gr.update(visible=True)
 
-        prompt.input(parse_meta, inputs=[prompt, state_is_generating], outputs=[prompt, generate_button, load_parameter_button], queue=False, show_progress=False)
+        prompt.input(parse_meta, inputs=[prompt, state_is_generating],
+                     outputs=[prompt, generate_button, load_parameter_button],
+                     queue=False, show_progress=False)
 
-        load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
+        load_parameter_button.click(modules.meta_parser.load_parameter_button_click,
+                                    inputs=[prompt, state_is_generating, inpaint_mode],
+                                    outputs=load_data_outputs, queue=False, show_progress=False)
 
         def trigger_metadata_import(file, state_is_generating):
             parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
@@ -1058,20 +1179,36 @@ with shared.gradio_root:
         metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
             .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
 
-        generate_button.click(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), [], True),
-                              outputs=[stop_button, skip_button, generate_button, gallery, state_is_generating]) \
-            .then(fn=refresh_seed, inputs=[seed_random, image_seed], outputs=image_seed) \
-            .then(fn=get_task, inputs=ctrls, outputs=currentTask) \
-            .then(fn=generate_clicked, inputs=currentTask, outputs=[progress_html, progress_window, progress_gallery, gallery]) \
-            .then(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), gr.update(visible=False, interactive=False), False),
-                  outputs=[generate_button, stop_button, skip_button, state_is_generating]) \
-            .then(fn=update_history_link, outputs=history_link) \
-            .then(fn=lambda: None, _js='playNotification').then(fn=lambda: None, _js='refresh_grid_delayed')
+        generate_button.click(generate_ui_state_change,
+                              outputs=[stop_button, skip_button, generate_button, gallery,
+                                       state_is_generating, queue_mode_state],
+                              queue=False, show_progress=False) \
+            .then(fn=refresh_seed, inputs=[seed_random, image_seed], outputs=image_seed,
+                  queue=False, show_progress=False) \
+            .then(fn=get_task, inputs=ctrls, outputs=currentTask,
+                  queue=False, show_progress=False) \
+            .then(fn=clear_prompt_if_queued, inputs=queue_mode_state, outputs=prompt,
+                  queue=False, show_progress=False) \
+            .then(fn=generate_clicked, inputs=[currentTask, queue_mode_state],
+                  outputs=[progress_html, progress_window, progress_gallery, gallery],
+                  queue=False, show_progress=False) \
+            .then(fn=generation_finished, inputs=queue_mode_state,
+                  outputs=[generate_button, stop_button, skip_button, state_is_generating],
+                  queue=False, show_progress=False) \
+            .then(fn=update_history_link, outputs=history_link,
+                  queue=False, show_progress=False) \
+            .then(fn=lambda queued: None, inputs=queue_mode_state,
+                  _js='(queued)=>{if(!queued){playNotification();}}',
+                  queue=False, show_progress=False) \
+            .then(fn=lambda: None, _js='refresh_grid_delayed',
+                  queue=False, show_progress=False) \
+            .then(fn=lambda: False, outputs=queue_mode_state,
+                  queue=False, show_progress=False)
 
-        reset_button.click(lambda: [worker.AsyncTask(args=[]), False, gr.update(visible=True, interactive=True)] +
+        reset_button.click(lambda: [worker.AsyncTask(args=[]), False, False, gr.update(visible=True, interactive=True)] +
                                    [gr.update(visible=False)] * 6 +
                                    [gr.update(visible=True, value=[])],
-                           outputs=[currentTask, state_is_generating, generate_button,
+                           outputs=[currentTask, state_is_generating, queue_mode_state, generate_button,
                                     reset_button, stop_button, skip_button,
                                     progress_html, progress_window, progress_gallery, gallery],
                            queue=False)
