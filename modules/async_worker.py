@@ -322,7 +322,6 @@ def worker():
     import numpy as np
     import torch
     import time
-    import shared
     import random
     import copy
     import cv2
@@ -351,15 +350,6 @@ def worker():
 
     pid = os.getpid()
     print(f'Started worker with PID {pid}')
-
-    try:
-        async_gradio_app = shared.gradio_root
-        flag = f'''App started successful. Use the app with {str(async_gradio_app.local_url)} or {str(async_gradio_app.server_name)}:{str(async_gradio_app.server_port)}'''
-        if async_gradio_app.share:
-            flag += f''' or {async_gradio_app.share_url}'''
-        print(flag)
-    except Exception as e:
-        print(e)
 
     def progressbar(async_task, number, text):
         print(f'[Fooocus] {text}')
@@ -423,7 +413,7 @@ def worker():
                     left = x * cell_width + (cell_width - img.shape[1]) // 2
                     wall[top:top + img.shape[0], left:left + img.shape[1], :] = img
 
-        # must use deep copy otherwise gradio is super laggy. Do not use list.append() .
+        # Build a new list so queue consumers never observe a partially updated result.
         async_task.results = async_task.results + [wall]
         return
 
@@ -486,8 +476,20 @@ def worker():
 
     def save_and_log(async_task, height, imgs, task, use_expansion, width, loras, persist_image=True) -> list:
         img_paths = []
+        operation = 'Generation'
+        if async_task.current_tab == 'batch_upscale' or 'upscale' in async_task.uov_method:
+            operation = 'Upscale'
+        elif 'vary' in async_task.uov_method:
+            operation = 'Vary'
+        elif async_task.current_tab == 'inpaint':
+            operation = 'Inpaint'
+        elif async_task.current_tab == 'enhance':
+            operation = 'Enhance'
+        elif async_task.current_tab == 'ip':
+            operation = 'Image prompt'
         for x in imgs:
-            d = [('Prompt', 'prompt', task['log_positive_prompt']),
+            d = [('Operation', 'operation', operation),
+                 ('Prompt', 'prompt', task['log_positive_prompt']),
                  ('Negative Prompt', 'negative_prompt', task['log_negative_prompt']),
                  ('Fooocus V2 Expansion', 'prompt_expansion', task['expansion']),
                  ('Styles', 'styles',
@@ -1147,7 +1149,10 @@ def worker():
 
         total_images = len(image_files)
         fast_upscale_method = flags.upscale_fast.casefold()
-        metadata = [('Upscale (Fast)', 'upscale_fast', '2x')]
+        metadata = [
+            ('Operation', 'operation', 'Upscale'),
+            ('Upscale (Fast)', 'upscale_fast', '2x'),
+        ]
 
         for index, image_file in enumerate(image_files):
             image, image_path = load_batch_upscale_image(image_file)

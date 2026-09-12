@@ -6,7 +6,7 @@
 
 [>>> Click Here to Install Fooocus <<<](#download)
 
-Fooocus is an image generating software (based on [Gradio](https://www.gradio.app/) <a href='https://github.com/gradio-app/gradio'><img src='https://img.shields.io/github/stars/gradio-app/gradio'></a>).
+Fooocus is an offline image generation application with a React web interface and a Python diffusion engine.
 
 Fooocus presents a rethinking of image generator designs. The software is offline, open source, and free, while at the same time, similar to many online image generators like Midjourney, the manual tweaking is not needed, and users only need to focus on the prompts and images. Fooocus has also simplified the installation: between pressing "download" and generating the first image, the number of needed mouse clicks is strictly limited to less than 3. Minimal GPU memory requirement is 4GB (Nvidia).
 
@@ -116,7 +116,7 @@ See also the common problems and troubleshoots [here](troubleshoot.md).
 | --- | --- |
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/lllyasviel/Fooocus/blob/main/fooocus_colab.ipynb) | Fooocus Official
 
-In Colab, you can modify the last line to `!python entry_with_update.py --share --always-high-vram` or `!python entry_with_update.py --share --always-high-vram --preset anime` or `!python entry_with_update.py --share --always-high-vram --preset realistic` for Fooocus Default/Anime/Realistic Edition.
+In Colab, you can modify the last line to `!python entry_with_update.py --always-high-vram` or `!python entry_with_update.py --always-high-vram --preset anime` or `!python entry_with_update.py --always-high-vram --preset realistic` for Fooocus Default/Anime/Realistic Edition.
 
 You can also change the preset in the UI. Please be aware that this may lead to timeouts after 60 seconds. If this is the case, please wait until the download has finished, change the preset to initial and back to the one you've selected or reload the page.
 
@@ -285,11 +285,48 @@ Given different goals, the default models and configs of Fooocus are different:
 Note that the download is **automatic** - you do not need to do anything if the internet connection is okay. However, you can download them manually if you (or move them from somewhere else) have your own preparation.
 
 ## UI Access and Authentication
-In addition to running on localhost, Fooocus can also expose its UI in two ways: 
-* Local UI listener: use `--listen` (specify port e.g. with `--port 8888`). 
-* API access: use `--share` (registers an endpoint at `.gradio.live`).
+Fooocus serves its React UI and JSON API from the same local server:
+* Local UI listener: use `--listen` (specify a port with `--port 8888`).
+* Browser access: open the printed server URL, normally `http://127.0.0.1:7865`.
 
-In both ways the access is unauthenticated by default. You can add basic authentication by creating a file called `auth.json` in the main directory, which contains a list of JSON objects with the keys `user` and `pass` (see example in [auth-example.json](./auth-example.json)).
+The JSON API is available under `/api`. It includes configuration, queue status, the persistent image library, generation, task controls, media, model refresh, image description, and metadata endpoints. Access is unauthenticated by default. You can add basic authentication by creating a file called `auth.json` in the main directory, which contains a list of JSON objects with the keys `user` and `pass` (see example in [auth-example.json](./auth-example.json)).
+
+### Frontend development
+
+The checked-in production bundle is generated from `frontend/`:
+
+```bash
+cd frontend
+npm install                  # first run only
+npm run build                # only needed for the bundled UI
+```
+
+The build writes to `static/`, which is served by the Python runtime. For frontend development, run the backend and Vite separately in two terminals; Vite serves the React app with hot reload, so no build is needed:
+
+**Terminal 1 — Fooocus backend**
+
+```powershell
+.\python_embeded\python.exe -s .\Fooocus\entry_with_update.py
+```
+
+**Terminal 2 — React frontend**
+
+```powershell
+Set-Location .\Fooocus\frontend
+npm install                  # first run only
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. The Vite proxy forwards `/api` requests to the backend on port `7865`.
+
+While an image is generating, submit another prompt with **Add to queue**. The current task keeps running and the new task waits in the Queue view. **Stop latest task** cancels the most recently submitted task without preventing additional prompts from being queued.
+
+To use another backend port, set both proxy variables before starting the two processes:
+
+```powershell
+$env:FOOOCUS_SERVER_PORT='8765'
+$env:VITE_API_TARGET='http://127.0.0.1:8765'
+```
 
 ## List of "Hidden" Tricks
 <a name="tech_list"></a>
@@ -383,14 +420,11 @@ entry_with_update.py  [-h] [--listen [IP]] [--port PORT]
                       [--always-offload-from-vram]
                       [--pytorch-deterministic] [--disable-server-log]
                       [--debug-mode] [--is-windows-embedded-python]
-                      [--disable-server-info] [--multi-user] [--share]
+                      [--disable-server-info] [--multi-user]
                       [--preset PRESET] [--disable-preset-selection]
-                      [--language LANGUAGE]
-                      [--disable-offload-from-vram] [--theme THEME]
-                      [--disable-image-log] [--disable-analytics]
+                      [--disable-offload-from-vram]
+                      [--disable-image-log]
                       [--disable-metadata] [--disable-preset-download]
-                      [--disable-enhance-output-sorting]
-                      [--enable-auto-describe-image]
                       [--always-download-new-model]
                       [--rebuild-hash-cache [CPU_NUM_THREADS]]
 ```
@@ -452,36 +486,3 @@ Also, thanks [daswer123](https://github.com/daswer123) for contributing the Canv
 ## Update Log
 
 The log is [here](update_log.md).
-
-## Localization/Translation/I18N
-
-You can put json files in the `language` folder to translate the user interface.
-
-For example, below is the content of `Fooocus/language/example.json`:
-
-```json
-{
-  "Generate": "生成",
-  "Input Image": "入力画像",
-  "Advanced": "고급",
-  "SAI 3D Model": "SAI 3D Modèle"
-}
-```
-
-If you add `--language example` arg, Fooocus will read `Fooocus/language/example.json` to translate the UI.
-
-For example, you can edit the ending line of Windows `run.bat` as
-
-    .\python_embeded\python.exe -s Fooocus\entry_with_update.py --language example
-
-Or `run_anime.bat` as
-
-    .\python_embeded\python.exe -s Fooocus\entry_with_update.py --language example --preset anime
-
-Or `run_realistic.bat` as
-
-    .\python_embeded\python.exe -s Fooocus\entry_with_update.py --language example --preset realistic
-
-For practical translation, you may create your own file like `Fooocus/language/jp.json` or `Fooocus/language/cn.json` and then use flag `--language jp` or `--language cn`. Apparently, these files do not exist now. **We need your help to create these files!**
-
-Note that if no `--language` is given and at the same time `Fooocus/language/default.json` exists, Fooocus will always load `Fooocus/language/default.json` for translation. By default, the file `Fooocus/language/default.json` does not exist.
