@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import urllib.parse
 import webbrowser
+import zipfile
 from html.parser import HTMLParser
 from uuid import uuid4
 from http import HTTPStatus
@@ -447,6 +448,7 @@ def library_payload() -> dict[str, Any]:
         metadata = item['metadata']
         width, height = _library_dimensions(path, metadata)
         library_item = {
+            'path': str(path),
             'url': url,
             'name': path.name,
             'modifiedAt': modified_at,
@@ -464,6 +466,59 @@ def library_payload() -> dict[str, Any]:
 
     items.sort(key=lambda item: item['modifiedAt'], reverse=True)
     return {'items': items}
+
+
+def _library_paths(payload: dict[str, Any]) -> list[Path]:
+    values = payload.get('paths')
+    if not isinstance(values, list) or not values:
+        raise ValueError('Select at least one library image.')
+
+    output_root = Path(config.path_outputs).resolve()
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('Library image paths must be strings.')
+        path = Path(value).resolve()
+        try:
+            path.relative_to(output_root)
+        except ValueError as error:
+            raise ValueError('Library images must be inside the output folder.') from error
+        if path.suffix.casefold() not in LIBRARY_IMAGE_SUFFIXES:
+            raise ValueError('Only generated image files can be managed.')
+        if not path.is_file():
+            raise ValueError(f'Library image not found: {path.name}.')
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            paths.append(path)
+
+    if not paths:
+        raise ValueError('Select at least one library image.')
+    return paths
+
+
+def _library_archive(paths: list[Path]) -> bytes:
+    output_root = Path(config.path_outputs).resolve()
+    archive_buffer = io.BytesIO()
+    archive_names: set[str] = set()
+    with zipfile.ZipFile(archive_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in paths:
+            archive_name = path.relative_to(output_root).as_posix()
+            if archive_name in archive_names:
+                archive_name = f'{path.stem}-{len(archive_names)}{path.suffix}'
+            archive_names.add(archive_name)
+            archive.write(path, arcname=archive_name)
+    return archive_buffer.getvalue()
+
+
+def _delete_library_images(paths: list[Path]) -> int:
+    for path in paths:
+        try:
+            path.unlink()
+        except OSError as error:
+            raise OSError(f'Unable to delete {path.name}: {error}') from error
+    return len(paths)
 
 
 def _default_loras() -> list[list[Any]]:
@@ -745,6 +800,9 @@ def _api_response(path: str, method: str, payload: dict[str, Any] | None) -> tup
         task = _build_task(payload or {})
         worker.enqueue_task(task, stream_to_ui=False)
         return HTTPStatus.ACCEPTED, {'taskId': task.queue_id}
+    if method == 'POST' and path == '/api/library/delete':
+        paths = _library_paths(payload or {})
+        return HTTPStatus.OK, {'deleted': _delete_library_images(paths)}
     if method == 'POST' and path.startswith('/api/tasks/') and path.endswith('/stop'):
         task_id = int(path.split('/')[3])
         return (HTTPStatus.OK, {'ok': True}) if _control_task(task_id, 'stop') else (HTTPStatus.NOT_FOUND, {'error': 'Task not found.'})
@@ -820,6 +878,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _send_error_json(self, status: int, message: str) -> None:
         self._send_json(status, {'error': message})
 
+    def _send_zip(self, content: bytes) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header('Content-Type', 'application/zip')
+        self.send_header('Content-Disposition', 'attachment; filename="fooocus-library.zip"')
+        self.send_header('Content-Length', str(len(content)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(content)
+
     def _serve_media(self, query: dict[str, list[str]]) -> None:
         requested = query.get('path', [''])[0]
         path = Path(requested)
@@ -889,7 +956,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw_body.decode('utf-8')) if raw_body else {}
             if not isinstance(payload, dict):
                 raise ValueError('Request body must be a JSON object.')
-            status, response = _api_response(urllib.parse.urlsplit(self.path).path, 'POST', payload)
+            request_path = urllib.parse.urlsplit(self.path).path
+            if request_path == '/api/library/download':
+                self._send_zip(_library_archive(_library_paths(payload)))
+                return
+            status, response = _api_response(request_path, 'POST', payload)
             self._send_json(status, response)
         except json.JSONDecodeError as error:
             self._send_error_json(HTTPStatus.BAD_REQUEST, f'Invalid JSON: {error.msg}.')

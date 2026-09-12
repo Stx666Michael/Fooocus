@@ -321,6 +321,8 @@ Open `http://127.0.0.1:5173`. The Vite proxy forwards `/api` requests to the bac
 
 While an image is generating, submit another prompt with **Add to queue**. The current task keeps running and the new task waits in the Queue view. **Stop latest task** cancels the most recently submitted task without preventing additional prompts from being queued.
 
+In the Image library, select one or more image cards to download them as a ZIP archive or delete them from the output folder. Deletion asks for confirmation and cannot be undone.
+
 To use another backend port, set both proxy variables before starting the two processes:
 
 ```powershell

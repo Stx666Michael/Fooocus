@@ -73,6 +73,7 @@ function Icon({ name, size = 18, strokeWidth = 1.8 }) {
     sliders: <><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h16" /><circle cx="8" cy="6" r="2" /><circle cx="15" cy="12" r="2" /><circle cx="11" cy="18" r="2" /></>,
     sparkle: <><path d="m12 3-1.2 5.8L5 10l5.8 1.2L12 17l1.2-5.8L19 10l-5.8-1.2L12 3Z" /><path d="m19 16-.5 2.5L16 19l2.5.5L19 22l.5-2.5L22 19l-2.5-.5L19 16Z" /></>,
     sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.9 4.9 1.4 1.4" /><path d="m17.7 17.7 1.4 1.4" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m4.9 19.1 1.4-1.4" /><path d="m17.7 6.3 1.4-1.4" /></>,
+    trash: <><path d="M4 7h16" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="m6 7 1 14h10l1-14" /><path d="M9 7V4h6v3" /></>,
     upload: <><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M4 20h16" /></>,
     wand: <><path d="m15 4 5 5" /><path d="m13 6 5 5L8 21H3v-5L13 6Z" /><path d="m3 3 1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3Z" /></>,
     x: <><path d="m6 6 12 12" /><path d="m18 6-12 12" /></>,
@@ -113,6 +114,23 @@ function itemTimestamp(item) {
   const value = Number(item?.modifiedAt);
   if (!Number.isFinite(value) || value <= 0) return 0;
   return value > 100000000000 ? value : value * 1000;
+}
+
+function mediaPathFromUrl(value) {
+  if (!value) return '';
+  try {
+    return new URL(value, window.location.origin).searchParams.get('path') || '';
+  } catch {
+    return '';
+  }
+}
+
+function libraryItemPath(item) {
+  return item?.path || mediaPathFromUrl(item?.url);
+}
+
+function libraryItemKey(item) {
+  return libraryItemPath(item) || item?.url || item?.name || '';
 }
 
 function dateKey(value) {
@@ -798,9 +816,22 @@ function QueueView({ queue, onStop }) {
   );
 }
 
-function LibraryView({ items, onSelect }) {
+function LibraryView({ items, onSelect, onDownload, onDelete }) {
   const [dateFilter, setDateFilter] = useState('all');
   const [sortOrder, setSortOrder] = useState('newest');
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedKeys, setSelectedKeys] = useState(() => new Set());
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
+
+  useEffect(() => {
+    const availableKeys = new Set(items.map(libraryItemKey));
+    setSelectedKeys((current) => {
+      const next = new Set([...current].filter((key) => availableKeys.has(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [items]);
+
   const dateOptions = useMemo(() => {
     const dates = [...new Set(items.map((item) => dateKey(itemTimestamp(item))).filter(Boolean))];
     return [
@@ -829,16 +860,72 @@ function LibraryView({ items, onSelect }) {
     });
   }, [dateFilter, items, sortOrder]);
 
+  const selectedItems = useMemo(
+    () => items.filter((item) => selectedKeys.has(libraryItemKey(item))),
+    [items, selectedKeys],
+  );
+  const selectedVisibleCount = visibleItems.filter((item) => selectedKeys.has(libraryItemKey(item))).length;
+  const allVisibleSelected = visibleItems.length > 0 && selectedVisibleCount === visibleItems.length;
   const hasFilters = dateFilter !== 'all';
   const countLabel = visibleItems.length === items.length
     ? `${items.length} ${items.length === 1 ? 'image' : 'images'}`
     : `${visibleItems.length} of ${items.length} images`;
+  const toggleSelection = (item) => {
+    const key = libraryItemKey(item);
+    setSelectedKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const toggleVisibleSelection = () => {
+    setSelectedKeys((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        visibleItems.forEach((item) => next.delete(libraryItemKey(item)));
+      } else {
+        visibleItems.forEach((item) => next.add(libraryItemKey(item)));
+      }
+      return next;
+    });
+  };
+  const clearSelection = () => setSelectedKeys(new Set());
+  const toggleSelectionMode = () => {
+    if (selectionMode) {
+      clearSelection();
+      setActionError('');
+    }
+    setSelectionMode((current) => !current);
+  };
+  const runAction = (action, clearAfter = false) => {
+    if (!selectedItems.length || actionBusy) return;
+    setActionError('');
+    setActionBusy(true);
+    Promise.resolve()
+      .then(() => action(selectedItems))
+      .then((success) => {
+        if (success !== false && clearAfter) clearSelection();
+      })
+      .catch((reason) => setActionError(reason.message || 'Library action failed.'))
+      .finally(() => setActionBusy(false));
+  };
+  const deleteSelected = () => {
+    if (!selectedItems.length || actionBusy) return;
+    const imageLabel = selectedItems.length === 1 ? 'this image' : `these ${selectedItems.length} images`;
+    if (window.confirm(`Delete ${imageLabel} from the output folder? This cannot be undone.`)) {
+      runAction(onDelete, true);
+    }
+  };
 
   return (
     <div className="subpage">
       <div className="page-heading">
         <div><span className="eyebrow">YOUR OUTPUTS</span><h1>Image <em>library.</em></h1><p>Saved generations stay here after you restart Fooocus.</p></div>
-        <Pill>{countLabel}</Pill>
+        <div className="library-heading-actions">
+          <Pill>{countLabel}</Pill>
+          {items.length > 0 && <button type="button" className="quiet-button" onClick={toggleSelectionMode} disabled={actionBusy}><Icon name={selectionMode ? 'check' : 'layers'} size={15} /> {selectionMode ? 'Done' : 'Select'}</button>}
+        </div>
       </div>
       {items.length > 0 && (
         <div className="library-toolbar">
@@ -849,15 +936,35 @@ function LibraryView({ items, onSelect }) {
           </div>
         </div>
       )}
+      {selectionMode && items.length > 0 && (
+        <div className="library-selection-toolbar">
+          <div className="library-selection-copy"><Icon name="check" size={15} /><span>{selectedItems.length ? `${selectedItems.length} selected` : 'Select images for batch actions'}</span></div>
+          <div className="library-selection-actions">
+            <button type="button" className="text-button" onClick={toggleVisibleSelection} disabled={!visibleItems.length || actionBusy}>{allVisibleSelected ? 'Deselect visible' : 'Select visible'}</button>
+            {selectedItems.length > 0 && <button type="button" className="text-button" onClick={clearSelection} disabled={actionBusy}>Clear</button>}
+            <button type="button" className="quiet-button" onClick={() => runAction(onDownload)} disabled={!selectedItems.length || actionBusy}><Icon name="download" size={14} /> Download</button>
+            <button type="button" className="quiet-button library-delete-button" onClick={deleteSelected} disabled={!selectedItems.length || actionBusy}><Icon name="trash" size={14} /> Delete</button>
+          </div>
+          {actionError && <div className="library-selection-error"><Icon name="info" size={14} /> {actionError}</div>}
+        </div>
+      )}
       {visibleItems.length ? (
-        <div className="library-grid">{visibleItems.map((item, index) => (
-          <button type="button" className="library-image" key={`${item.url}-${index}`} onClick={() => onSelect(item)} title={item.prompt || item.name}>
-            <img src={item.url} alt={item.prompt || `Generated result ${index + 1}`} />
-            <b className="library-ratio">{itemAspectRatio(item)}</b>
-            {item.prompt && <small>{item.prompt}</small>}
-            <span className="library-image-action"><Icon name="arrow" size={15} /></span>
-          </button>
-        ))}</div>
+        <div className="library-grid">{visibleItems.map((item, index) => {
+          const selected = selectedKeys.has(libraryItemKey(item));
+          return (
+            <div className="library-card" key={`${libraryItemKey(item)}-${index}`}>
+              <button type="button" className={`library-image ${selected ? 'is-selected' : ''}`} onClick={() => onSelect(item)} title={item.prompt || item.name} aria-label={`Open ${item.name || `image ${index + 1}`}`}>
+                <img src={item.url} alt={item.prompt || `Generated result ${index + 1}`} />
+                <b className="library-ratio">{itemAspectRatio(item)}</b>
+                {item.prompt && <small>{item.prompt}</small>}
+                <span className="library-image-action"><Icon name="arrow" size={15} /></span>
+              </button>
+              {selectionMode && <label className="library-select" title={selected ? 'Deselect image' : 'Select image'}>
+                <input type="checkbox" checked={selected} onChange={() => toggleSelection(item)} aria-label={selected ? `Deselect ${item.name || 'image'}` : `Select ${item.name || 'image'}`} />
+              </label>}
+            </div>
+          );
+        })}</div>
       ) : (
         <section className="panel library-empty">
           <EmptyState
@@ -1023,6 +1130,48 @@ function App() {
       .catch(() => {});
   }, []);
 
+  const downloadLibrary = useCallback((selectedItems) => {
+    const paths = [...new Set(selectedItems.map(libraryItemPath).filter(Boolean))];
+    if (!paths.length) return Promise.reject(new Error('Select at least one library image.'));
+    return fetch('/api/library/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    })
+      .then((response) => apiError(response, 'Unable to download the selected images.'))
+      .then((response) => response.blob())
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = 'fooocus-library.zip';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+        setNotice(`Downloaded ${selectedItems.length} ${selectedItems.length === 1 ? 'image' : 'images'}.`);
+        return true;
+      });
+  }, []);
+
+  const deleteLibrary = useCallback((selectedItems) => {
+    const paths = [...new Set(selectedItems.map(libraryItemPath).filter(Boolean))];
+    if (!paths.length) return Promise.reject(new Error('Select at least one library image.'));
+    return fetch('/api/library/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    })
+      .then((response) => apiError(response, 'Unable to delete the selected images.'))
+      .then((response) => response.json())
+      .then(({ deleted }) => {
+        const deletedPaths = new Set(paths);
+        setSessionGallery((current) => current.filter((url) => !deletedPaths.has(mediaPathFromUrl(url))));
+        setNotice(`Deleted ${deleted} ${deleted === 1 ? 'image' : 'images'}.`);
+        return loadLibrary().then(() => true);
+      });
+  }, [loadLibrary]);
+
   const pollQueue = useCallback(() => {
     return fetch('/api/queue')
       .then((response) => apiError(response, 'Unable to read the generation queue.'))
@@ -1174,7 +1323,7 @@ function App() {
   };
 
   const activeCount = queue.items.filter((item) => item.status === 'pending' || item.status === 'generating').length;
-  const sessionItems = sessionGallery.map((url) => ({ url, name: 'Current generation', metadata: {}, operation: 'Generation' }));
+  const sessionItems = sessionGallery.map((url) => ({ url, path: mediaPathFromUrl(url), name: 'Current generation', metadata: {}, operation: 'Generation' }));
   const libraryItems = [
     ...library,
     ...sessionItems.filter((item) => !library.some((libraryItem) => libraryItem.url === item.url)),
@@ -1206,7 +1355,7 @@ function App() {
           {configError && <div className="page-error"><Icon name="info" size={16} /> {configError} <button type="button" onClick={refresh}>Retry</button></div>}
           {view === 'create' && <CreateView form={form} setForm={setForm} config={config} queue={{ ...queue, gallery: sessionGallery }} previewImage={previewImage} setPreviewImage={setPreviewImage} onGenerate={generate} onDescribe={describe} onMetadata={readMetadata} metadataResult={metadataResult} onStop={() => stop()} onViewQueue={() => setView('queue')} taskActive={Boolean(taskId)} taskId={taskId} error={submitError} />}
           {view === 'queue' && <QueueView queue={queue} onStop={stop} />}
-          {view === 'library' && <LibraryView items={libraryItems} onSelect={setLibraryLightbox} />}
+          {view === 'library' && <LibraryView items={libraryItems} onSelect={setLibraryLightbox} onDownload={downloadLibrary} onDelete={deleteLibrary} />}
           {view === 'styles' && <StylesView config={config} form={form} setForm={setForm} />}
           {view === 'models' && <ModelsView config={config} form={form} setForm={setForm} onRefresh={refresh} />}
         </div>
